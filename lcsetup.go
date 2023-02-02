@@ -3,17 +3,27 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
-	"strconv"
+	"os/exec"
 	"strings"
 
-	//"io"
 	"encoding/json"
 	"net/http"
 
 	"golang.org/x/net/html"
 )
+
+const permissionBits = fs.ModePerm
+
+func exists(path string) bool {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		//fmt.Printf("Path:%s does NOT exist\n", path)
+		return false
+	}
+	return true
+}
 
 func scrapeContent(n *html.Node, buf *bytes.Buffer) {
 	if n.Type == html.TextNode {
@@ -31,7 +41,7 @@ func scrapeProblemData(url string) {
 	}
 	defer res.Body.Close()
 	if res.StatusCode != 200 {
-		log.Fatalf("Error Code: %d \t Status:%s\n", res.StatusCode, res.Status)
+		log.Fatalf("Error Code:%d\tStatus:%s\n", res.StatusCode, res.Status)
 	}
 	doc, e1 := html.Parse(res.Body)
 	if e1 != nil {
@@ -44,11 +54,9 @@ func scrapeProblemData(url string) {
 		if n.Type == html.ElementNode && n.Data == "script" {
 			if n.Attr != nil && len(n.Attr) > 0 && n.Attr[0].Val == "__NEXT_DATA__" {
 				text := &bytes.Buffer{}
-				//collectText(n, text)
 				scrapeContent(n, text)
 				bufferOut = text
 			}
-		} else {
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			f(c)
@@ -58,13 +66,14 @@ func scrapeProblemData(url string) {
 
 	var data map[string]interface{}
 	if jsonError := json.Unmarshal(bufferOut.Bytes(), &data); jsonError != nil {
-		fmt.Println("Error unmarshalling")
+		fmt.Println("Error unmarshalling JSON data")
 		fmt.Println(jsonError)
+		return
 	}
 
 	var findQuestionData func(map[string]interface{})
 	findQuestionData = func(m map[string]interface{}) {
-		for k, v := range m {
+		for _, v := range m {
 			switch vtyped := v.(type) {
 			case string:
 				//fmt.Println(k, "is string", vtyped)
@@ -72,8 +81,7 @@ func scrapeProblemData(url string) {
 				//fmt.Println(k, "is bool", vtyped)
 			case float64:
 				//fmt.Println(k, "is float64", vtyped)
-			case []interface{}:
-				fmt.Println(k, "is an array:")
+			case []interface{}: // JSON Array
 				for _, u := range vtyped {
 					val, exists := u.(map[string]interface{})
 					if exists {
@@ -81,18 +89,15 @@ func scrapeProblemData(url string) {
 					}
 					//fmt.Printf("i:%d, u:%s\n", i, u)
 				}
-				//findQuestionData(v.(map[string]interface{}))
-			case map[string]interface{}:
+			case map[string]interface{}: // JSON Object
 				if val, exists := vtyped["title"]; exists {
-					fmt.Printf("Found titleSlug:%s\n", val)
 					titleChan <- val.(string)
 				} else if val, exists := vtyped["questionFrontendId"]; exists {
-					fmt.Printf("Found questionFrontendID:%s\n", val)
 					questionIdChan <- val.(string)
 				}
-				findQuestionData(v.(map[string]interface{}))
+				findQuestionData(vtyped)
 			default:
-				fmt.Printf("unknown value type for key:%s\n", k)
+				//fmt.Printf("unknown value type for key:%s\n", k)
 			}
 		}
 	}
@@ -113,50 +118,50 @@ func main() {
 
 	var title string
 	var question string
-	var questionId int
 	for i := 0; i < 2; i++ {
 		select {
 		case title = <-titleChan:
 			title = strings.ReplaceAll(title, " ", "_")
-			fmt.Printf("Got Title:%s\n", title)
 		case question = <-questionIdChan:
-			fmt.Printf("Got QuestionId:%s\n", question)
-			conv, err := strconv.Atoi(question)
-			if err != nil {
-				fmt.Println("Error converting questionId to an integer:", err)
-			}
-			questionId = conv
-			fmt.Printf("Question ID converted:%d\n", conv)
 		}
 	}
 
-	fmt.Printf("\n\nGot title:%s\nGot questionID:%d\n", title, questionId)
+	fmt.Printf("Got Title:%s\tGot QuestionId:%s\n", title, question)
 	folderTitle := question + "_" + title
-	fmt.Printf("Folder title:%s\n", folderTitle)
+	createFolder(folderTitle)
 
+	filePath := folderTitle + string(os.PathSeparator) + folderTitle + "." + fileExtension
+	createFile(filePath, fileExtension)
+
+	fmt.Printf("\n\tvim %s\n\n", filePath)
+	cmd := exec.Command("vim", filePath)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if vimErr := cmd.Run(); vimErr != nil {
+		fmt.Printf("Error opening editor:%s\n", vimErr)
+	}
+	os.Exit(0)
+}
+
+func createFolder(folderTitle string) {
 	if exists(folderTitle + string(os.PathSeparator)) {
 		fmt.Println("Folder ", folderTitle, " already exists")
 		return
 	}
-	folderErr := os.Mkdir(folderTitle+string(os.PathSeparator), 0777)
+	folderErr := os.Mkdir(folderTitle+string(os.PathSeparator), permissionBits)
 	if folderErr != nil {
 		log.Fatalf("Error creating folder:%s\n", folderErr)
 	}
+}
 
-	if exists(folderTitle + string(os.PathSeparator) + folderTitle + "." + fileExtension) {
-		fmt.Println("File ", folderTitle, " already exists")
+func createFile(filePath string, fileExtension string) {
+	if exists(filePath) {
+		fmt.Println("File ", filePath, " already exists")
 		return
 	}
-	fileErr := os.WriteFile(folderTitle+string(os.PathSeparator)+folderTitle+"."+fileExtension, []byte(""), 0777)
+	fileErr := os.WriteFile(filePath, []byte(""), permissionBits)
 	if fileErr != nil {
 		log.Fatalf("Error creating file:%s\n", fileErr)
 	}
-}
-
-func exists(path string) bool {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		fmt.Printf("Path:%s does NOT exist\n", path)
-		return false
-	}
-	return true
 }
