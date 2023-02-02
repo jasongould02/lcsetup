@@ -25,6 +25,8 @@ func exists(path string) bool {
 	return true
 }
 
+// @tux21b
+// https://stackoverflow.com/a/18275336
 func scrapeContent(n *html.Node, buf *bytes.Buffer) {
 	if n.Type == html.TextNode {
 		buf.WriteString(n.Data)
@@ -49,8 +51,8 @@ func scrapeProblemData(url string) {
 	}
 
 	var bufferOut *bytes.Buffer
-	var f func(*html.Node)
-	f = func(n *html.Node) {
+	var collectJSONElement func(*html.Node)
+	collectJSONElement = func(n *html.Node) {
 		if n.Type == html.ElementNode && n.Data == "script" {
 			if n.Attr != nil && len(n.Attr) > 0 && n.Attr[0].Val == "__NEXT_DATA__" {
 				text := &bytes.Buffer{}
@@ -59,10 +61,10 @@ func scrapeProblemData(url string) {
 			}
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			f(c)
+			collectJSONElement(c)
 		}
 	}
-	f(doc)
+	collectJSONElement(doc)
 
 	var data map[string]interface{}
 	if jsonError := json.Unmarshal(bufferOut.Bytes(), &data); jsonError != nil {
