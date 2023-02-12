@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"strings"
 
+	//"time"
+
 	"encoding/json"
 	"net/http"
 
@@ -21,6 +23,9 @@ func exists(path string) bool {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		//fmt.Printf("Path:%s does NOT exist\n", path)
 		return false
+	} else if err != nil {
+		fmt.Println("File may already exist:")
+		fmt.Println("\tError: ", err)
 	}
 	return true
 }
@@ -45,6 +50,8 @@ func scrapeProblemData(url string) {
 	if res.StatusCode != 200 {
 		log.Fatalf("Error Code:%d\tStatus:%s\n", res.StatusCode, res.Status)
 	}
+	//time.Sleep(2 * time.Second)
+	//fmt.Printf("body: %s\n", []byte(res.Body))
 	doc, e1 := html.Parse(res.Body)
 	if e1 != nil {
 		log.Fatalf("Error:%s\n", e1)
@@ -94,7 +101,8 @@ func scrapeProblemData(url string) {
 			case map[string]interface{}: // JSON Object
 				if val, exists := vtyped["title"]; exists {
 					titleChan <- val.(string)
-				} else if val, exists := vtyped["questionFrontendId"]; exists {
+				}
+				if val, exists := vtyped["questionFrontendId"]; exists {
 					questionIdChan <- val.(string)
 				}
 				findQuestionData(vtyped)
