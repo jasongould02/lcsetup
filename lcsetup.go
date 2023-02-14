@@ -1,8 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -13,110 +13,68 @@ import (
 
 	"encoding/json"
 	"net/http"
-
-	"golang.org/x/net/html"
 )
 
 const permissionBits = fs.ModePerm
 
-func exists(path string) bool {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		//fmt.Printf("Path:%s does NOT exist\n", path)
-		return false
-	} else if err != nil {
-		fmt.Println("File may already exist:")
-		fmt.Println("\tError: ", err)
-	}
-	return true
-}
+var titleChan chan string = make(chan string)
+var questionIdChan chan string = make(chan string)
 
-// @tux21b
-// https://stackoverflow.com/a/18275336
-func scrapeContent(n *html.Node, buf *bytes.Buffer) {
-	if n.Type == html.TextNode {
-		buf.WriteString(n.Data)
-	}
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		scrapeContent(c, buf)
-	}
-}
-
-func scrapeProblemData(url string) {
-	res, err := http.Get(url)
+func queryQuestion(titleSlug string) {
+	//https://leetcode.com/graphql?query={question(titleSlug:%22isomorphic-strings%22)%20{questionFrontendId%20titleSlug}}
+	res, err := http.Get("https://leetcode.com/graphql?query={question(titleSlug: " + "\"" + titleSlug + "\") {questionFrontendId title}}")
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Error with get request:%s\n", err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode != 200 {
 		log.Fatalf("Error Code:%d\tStatus:%s\n", res.StatusCode, res.Status)
 	}
-	//time.Sleep(2 * time.Second)
-	//fmt.Printf("body: %s\n", []byte(res.Body))
-	doc, e1 := html.Parse(res.Body)
-	if e1 != nil {
-		log.Fatalf("Error:%s\n", e1)
+	fmt.Printf("Status Code:%d\tStatus:%s\n", res.StatusCode, res.Status)
+
+	bodyBytes, bodyBytesErr := io.ReadAll(res.Body)
+	if bodyBytesErr != nil {
+		log.Fatalf("Error reading body bytes\n")
 	}
 
-	var bufferOut *bytes.Buffer
-	var collectJSONElement func(*html.Node)
-	collectJSONElement = func(n *html.Node) {
-		if n.Type == html.ElementNode && n.Data == "script" {
-			if n.Attr != nil && len(n.Attr) > 0 && n.Attr[0].Val == "__NEXT_DATA__" {
-				text := &bytes.Buffer{}
-				scrapeContent(n, text)
-				bufferOut = text
-			}
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			collectJSONElement(c)
-		}
-	}
-	collectJSONElement(doc)
-
+	//fmt.Println("Starting to unmarshal JSON")
 	var data map[string]interface{}
-	if jsonError := json.Unmarshal(bufferOut.Bytes(), &data); jsonError != nil {
-		fmt.Println("Error unmarshalling JSON data")
-		fmt.Println(jsonError)
+	if jsonError := json.Unmarshal(bodyBytes, &data); jsonError != nil {
+		log.Fatalf("Error unmarshalling JSON data:%s\n", jsonError)
 		return
 	}
+	//fmt.Println("Finishing unmarshalling data")
 
+	//fmt.Printf("JSONMAP:%+v\n", data)
 	var findQuestionData func(map[string]interface{})
 	findQuestionData = func(m map[string]interface{}) {
-		for _, v := range m {
+		for k, v := range m {
 			switch vtyped := v.(type) {
 			case string:
-				//fmt.Println(k, "is string", vtyped)
-			case bool:
-				//fmt.Println(k, "is bool", vtyped)
-			case float64:
-				//fmt.Println(k, "is float64", vtyped)
+				switch k {
+				case "questionFrontendId":
+					questionIdChan <- vtyped
+				case "title":
+					titleChan <- vtyped
+				}
 			case []interface{}: // JSON Array
-				for _, u := range vtyped {
-					val, exists := u.(map[string]interface{})
-					if exists {
-						findQuestionData(val)
+				for _, iv := range vtyped {
+					switch element := iv.(type) {
+					case map[string]interface{}:
+						findQuestionData(element)
 					}
-					//fmt.Printf("i:%d, u:%s\n", i, u)
 				}
 			case map[string]interface{}: // JSON Object
-				if val, exists := vtyped["title"]; exists {
-					titleChan <- val.(string)
-				}
-				if val, exists := vtyped["questionFrontendId"]; exists {
-					questionIdChan <- val.(string)
-				}
 				findQuestionData(vtyped)
 			default:
-				//fmt.Printf("unknown value type for key:%s\n", k)
+				fmt.Printf("Unknown value type for key:%s\n", k)
 			}
 		}
 	}
 
 	findQuestionData(data)
+	//fmt.Println("BodyBytes:", string(bodyBytes))
 }
-
-var titleChan chan string = make(chan string)
-var questionIdChan chan string = make(chan string)
 
 func main() {
 	args := os.Args[1:]
@@ -124,7 +82,9 @@ func main() {
 	url := args[0]
 	fileExtension := args[1]
 
-	go scrapeProblemData(url)
+	go queryQuestion(url)
+
+	//go scrapeProblemData(url)
 
 	var title string
 	var question string
@@ -136,22 +96,32 @@ func main() {
 		}
 	}
 
-	fmt.Printf("Got Title:%s\tGot QuestionId:%s\n", title, question)
+	//fmt.Printf("Title:%s\tQuestionId:%s\n", title, question)
 	folderTitle := question + "_" + title
 	createFolder(folderTitle)
 
 	filePath := folderTitle + string(os.PathSeparator) + folderTitle + "." + fileExtension
-	createFile(filePath, fileExtension)
+	createFile(filePath, fileExtension) // Will not overwrite existing files
 
+	fmt.Printf("Created %s\n", filePath)
 	fmt.Printf("\n\tvim %s\n\n", filePath)
 	cmd := exec.Command("vim", filePath)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if vimErr := cmd.Run(); vimErr != nil {
-		fmt.Printf("Error opening editor:%s\n", vimErr)
+		log.Printf("Error opening editor:%s\n", vimErr)
 	}
-	os.Exit(0)
+
+}
+
+func exists(path string) bool {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return false
+	} else if err != nil {
+		log.Fatalf("Error:%s\n", err)
+	}
+	return true
 }
 
 func createFolder(folderTitle string) {
